@@ -8,12 +8,13 @@ import (
 )
 
 // Queriers stores all the enabled sources
-type Queriers map[string]Querier
+type Queriers []*Querier
 
 // Querier wrap base.SubdomainFinder with input and output channel for concurrency
 // multiple goroutines (controlled by '-worker') consume query from Querier.In
-// and output the result from source to Querier.Out
+// and output the result to Querier.Out
 type Querier struct {
+	Name   string
 	Client base.SubdomainFinder // Statistic info can be accessed by Client.GetStat()
 	In     chan Query
 	Out    chan Result
@@ -26,8 +27,8 @@ type Query struct {
 	IP     string
 }
 
-// Result is the API query result for each domain(ip), with result subdomains in list, which is flatten to OutRecord
-// for json line file
+// Result is the API query result for each domain(ip), with result subdomains in list,
+// which is flatten to OutRecord for json line file
 type Result struct {
 	Domain         string
 	IP             string
@@ -39,71 +40,78 @@ type Result struct {
 }
 
 func NewQueriers(sfs ...base.SubdomainFinder) Queriers {
-	qMap := make(map[string]Querier)
+	q := Queriers{}
 	for _, sdf := range sfs {
-		qMap[sdf.Name()] = Querier{Client: sdf, In: make(chan Query), Out: make(chan Result)}
+		q = append(q, &Querier{
+			Name:   sdf.Name(),
+			Client: sdf,
+			In:     make(chan Query),
+			Out:    make(chan Result),
+		})
 	}
-	return qMap
+	return q
 }
 
 func (q Queriers) CollectStat() map[string]base.Stat {
 	stat := make(map[string]base.Stat)
-	for name := range q {
-		stat[name] = *q[name].Client.GetStat()
+	for _, item := range q {
+		stat[item.Name] = *item.Client.GetStat()
 	}
 	return stat
 }
 
-func (q Queriers) GetNames(filter func(name string) bool) []string {
+func (q Queriers) GetNames(filter func(item *Querier) bool) []string {
 	var result []string
-	for name := range q {
-		if filter == nil || filter(name) {
-			result = append(result, name)
+	for _, item := range q {
+		if filter == nil || filter(item) {
+			result = append(result, item.Name)
 		}
 	}
 	return result
 }
 
-func (q Queriers) Iter(f func(name string), filter func(name string) bool) {
-	for name := range q {
-		if filter == nil || filter(name) {
-			f(name)
+func (q Queriers) Iter(f func(item *Querier), filter func(item *Querier) bool) {
+	for _, item := range q {
+		if filter == nil || filter(item) {
+			f(item)
 		}
 	}
 }
 
-func (q Queriers) Send(qItem Query, filter func(name string) bool) {
-	q.Iter(func(name string) { q[name].In <- qItem }, filter)
+func (q Queriers) Send(qItem Query, filter func(item *Querier) bool) {
+	q.Iter(func(item *Querier) { item.In <- qItem }, filter)
 }
 
-func (q Queriers) StartWorkers(ctx context.Context, filter func(name string) bool) {
-	q.Iter(func(name string) {
+func (q Queriers) StartWorkers(ctx context.Context, filter func(item *Querier) bool) {
+	q.Iter(func(item *Querier) {
 		var wg sync.WaitGroup
-		wg.Add(q[name].Client.Workers())
-		for i := 0; i < q[name].Client.Workers(); i++ {
-			go func(name string, wg *sync.WaitGroup) {
-				for query := range q[name].In {
+		wg.Add(item.Client.Workers())
+		for i := 0; i < item.Client.Workers(); i++ {
+			go func(item *Querier, wg *sync.WaitGroup) {
+				rm := item.Client.RelatedMethod() + "/" + string(item.Name)
+				rt := item.Client.RelatedType()
+				for query := range item.In {
 					result := Result{
 						Domain:         query.Domain,
-						RelationMethod: q[name].Client.RelatedMethod() + "/" + string(name),
-						RelationType:   q[name].Client.RelatedType(),
+						RelationMethod: rm,
+						RelationType:   rt,
 						IType:          base.InputDomain,
 					}
-					if q[name].Client.ServeType() == base.InputDomain {
-						result.Subdomains, result.Err = q[name].Client.Get(ctx, query.Domain)
-					} else if q[name].Client.ServeType() == base.InputIP {
-						result.Subdomains, result.Err = q[name].Client.Get(ctx, query.IP)
+					if item.Client.ServeType() == base.InputDomain {
+						result.Subdomains, result.Err = item.Client.Get(ctx, query.Domain)
+					} else if item.Client.ServeType() == base.InputIP {
+						result.Subdomains, result.Err = item.Client.Get(ctx, query.IP)
 						result.IP, result.IType = query.IP, base.InputIP
 					}
-					q[name].Out <- result
+					item.Out <- result
 				}
 				wg.Done()
-			}(name, &wg)
+			}(item, &wg)
 		}
-		go func(name string, wg *sync.WaitGroup) {
+		go func(item *Querier, wg *sync.WaitGroup) {
 			wg.Wait()
-			close(q[name].Out)
-		}(name, &wg)
+			close(item.Out)
+		}(item, &wg)
 	}, filter)
 }
 
@@ -111,13 +119,13 @@ func (q Queriers) Aggr() (outChan chan Result) {
 	outChan = make(chan Result)
 	var wg sync.WaitGroup
 	wg.Add(len(q))
-	q.Iter(func(name string) {
-		go func(name string, wg *sync.WaitGroup) {
-			for rst := range q[name].Out {
+	q.Iter(func(item *Querier) {
+		go func(item *Querier, wg *sync.WaitGroup) {
+			for rst := range item.Out {
 				outChan <- rst
 			}
 			wg.Done()
-		}(name, &wg)
+		}(item, &wg)
 	}, nil)
 	go func() {
 		wg.Wait()
@@ -126,10 +134,6 @@ func (q Queriers) Aggr() (outChan chan Result) {
 	return outChan
 }
 
-func (q Queriers) Close(filter func(name string) bool) {
-	for name := range q {
-		if filter == nil || filter(name) {
-			close(q[name].In)
-		}
-	}
+func (q Queriers) Close(filter func(item *Querier) bool) {
+	q.Iter(func(item *Querier) { close(item.In) }, filter)
 }

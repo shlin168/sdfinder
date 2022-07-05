@@ -58,12 +58,12 @@ func TestQueriers(t *testing.T) {
 	assert.Equal(t, len(testqs), len(qs))
 
 	var total int
-	qs.Iter(func(name string) { total++ }, nil)
+	qs.Iter(func(*Querier) { total++ }, nil)
 	assert.Equal(t, 3, total)
 
 	total = 0
-	filterT1 := func(name string) bool { return name == "test1" }
-	qs.Iter(func(name string) { total++ }, filterT1)
+	filterT1 := func(item *Querier) bool { return item.Name == "test1" }
+	qs.Iter(func(*Querier) { total++ }, filterT1)
 	assert.Equal(t, 1, total)
 
 	names := qs.GetNames(nil)

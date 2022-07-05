@@ -68,7 +68,7 @@ func NewExecutorWithConfig(cfg *Config) (*Executor, error) {
 	if len(e.Querier) == 0 {
 		return nil, fmt.Errorf("no client init success")
 	}
-	ipOnly := func(name string) bool { return e.Querier[name].Client.ServeType() == base.InputIP }
+	ipOnly := func(item *Querier) bool { return item.Client.ServeType() == base.InputIP }
 	if len(e.Querier.GetNames(ipOnly)) > 0 {
 		e.UniIP = make(map[string]struct{})
 	}
@@ -93,9 +93,9 @@ func (e *Executor) CollectStat() {
 // If domain or ip has been sent before, it will be skipped.
 // The results from queriers are all sent to return channel for further processing
 func (e *Executor) SendToQueriersAndAggr(ctx context.Context, qChan <-chan Query) chan Result {
-	domainOnly := func(name string) bool { return e.Querier[name].Client.ServeType() == base.InputDomain }
+	domainOnly := func(item *Querier) bool { return item.Client.ServeType() == base.InputDomain }
 	domainQuerierNames := e.Querier.GetNames(domainOnly)
-	ipOnly := func(name string) bool { return e.Querier[name].Client.ServeType() == base.InputIP }
+	ipOnly := func(item *Querier) bool { return item.Client.ServeType() == base.InputIP }
 	ipQuerierNames := e.Querier.GetNames(ipOnly)
 	go func() {
 		for qItem := range qChan {
@@ -118,9 +118,7 @@ func (e *Executor) SendToQueriersAndAggr(ctx context.Context, qChan <-chan Query
 		}
 		e.Querier.Close(nil)
 	}()
-	// Aggreate results and sends to one output channel,
-	// message in channel represents the result from one source for one root domain
-	// E.g., result from Crtsh for domain 'google.com'
+	// aggreate results and sends to one output channel
 	return e.Querier.Aggr()
 }
 

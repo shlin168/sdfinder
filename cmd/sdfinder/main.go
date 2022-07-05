@@ -175,12 +175,12 @@ func main() {
 		subdomainFinders.Stat.SubDomainsCnt,
 		subdomainFinders.Stat.TotalOutputRow,
 	)
-	for name := range subdomainFinders.Querier {
-		queryStat, err := json.Marshal(subdomainFinders.Querier[name].Client.GetStat())
+	for _, item := range subdomainFinders.Querier {
+		queryStat, err := json.Marshal(item.Client.GetStat())
 		if err != nil {
-			logger.WithField("name", name).WithError(err).Warn("decode stat")
+			logger.WithField("name", item.Name).WithError(err).Warn("decode stat")
 			continue
 		}
-		logger.Infof("%s: %s\n", name, string(queryStat))
+		logger.Infof("%s: %s\n", item.Name, string(queryStat))
 	}
 }
