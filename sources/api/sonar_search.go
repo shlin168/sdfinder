@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"strings"
+	"sync"
 
 	pb "github.com/cgboal/sonarsearch/proto"
+	"golang.org/x/net/publicsuffix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -14,11 +17,12 @@ import (
 // type: grpc
 // rate limit: no
 // github: https://github.com/Cgboal/SonarSearch/tree/ddd8c134e2e4a09ace434c5a76972c7895ebc58e
-const NameSonarSearch = "sonarsearch/subdomains"
+const NameSonarSearch = "sonarsearch"
+const NameSonarSearchSbs = "sonarsearch/subdomains"
 const NameSonarSearchRvs = "sonarsearch/reverse"
 
 func init() {
-	base.MustRegister(NameSonarSearch, NewSonarSearch())
+	base.MustRegister(NameSonarSearchSbs, NewSonarSearchSbs())
 	base.MustRegister(NameSonarSearchRvs, NewSonarSearchRvs())
 }
 
@@ -26,6 +30,12 @@ type SonarSearch struct {
 	base.SDFinder
 	conn *grpc.ClientConn
 	cli  pb.CrobatClient
+}
+
+type SonarSearchSbs struct {
+	SonarSearch
+	RspCache     map[string][]string
+	RspCacheLock *sync.RWMutex
 }
 
 func NewSonarSearch() *SonarSearch {
@@ -46,23 +56,17 @@ func (ss *SonarSearch) Init(opts ...base.Option) error {
 	return ss.SDFinder.Init(opts...)
 }
 
-func (ss *SonarSearch) Close() error {
-	return ss.conn.Close()
-}
-
-func (ss SonarSearch) Name() string {
-	return NameSonarSearch
-}
-
 func (ss *SonarSearch) Get(ctx context.Context, domain string) (subdomains []string, err error) {
-	defer func() {
-		ss.RecordStat(subdomains, err)
-	}()
 	sbChan, err := ss.GetChan(ctx, domain)
 	if err != nil {
 		return nil, err
 	}
+	uniDomainMap := make(map[string]struct{})
 	for sb := range sbChan {
+		sblower := strings.ToLower(sb)
+		uniDomainMap[sblower] = struct{}{}
+	}
+	for sb := range uniDomainMap {
 		subdomains = append(subdomains, sb)
 	}
 	return subdomains, nil
@@ -89,6 +93,50 @@ func (ss *SonarSearch) GetChan(ctx context.Context, domain string) (chan string,
 		}
 	}()
 	return resultChan, nil
+}
+
+func (ss *SonarSearch) Close() error {
+	return ss.conn.Close()
+}
+
+func NewSonarSearchSbs() *SonarSearchSbs {
+	return &SonarSearchSbs{
+		SonarSearch:  *NewSonarSearch(),
+		RspCache:     make(map[string][]string),
+		RspCacheLock: &sync.RWMutex{},
+	}
+}
+
+func (ss SonarSearchSbs) Name() string {
+	return NameSonarSearchSbs
+}
+
+func (sbs *SonarSearchSbs) Get(ctx context.Context, domain string) (subdomains []string, err error) {
+	defer func() {
+		sbs.RecordStat(subdomains, err)
+	}()
+	publicSuffix, _ := publicsuffix.PublicSuffix(domain)
+	sbs.RspCacheLock.RLock()
+	rsp, hasQueried := sbs.RspCache[publicSuffix]
+	sbs.RspCacheLock.RUnlock()
+	if !hasQueried {
+		rsp, err = sbs.SonarSearch.Get(ctx, domain)
+		if err != nil {
+			return rsp, err
+		}
+		sbs.RspCacheLock.Lock()
+		sbs.RspCache[publicSuffix] = rsp
+		sbs.RspCacheLock.Unlock()
+	}
+	// sonarsearch subdomain API using public suffix of input domains which might return non subdomains
+	// E.g, 'allsix.com.ru' return subdomains of 'com.ru' which is not what we expect
+	for _, s := range rsp {
+		if !strings.HasSuffix(s, "."+domain) {
+			continue
+		}
+		subdomains = append(subdomains, s)
+	}
+	return subdomains, nil
 }
 
 type SonarSearchRvs struct {
@@ -123,7 +171,12 @@ func (ss *SonarSearchRvs) Get(ctx context.Context, ip string) (subdomains []stri
 	if err != nil {
 		return nil, err
 	}
+	uniDomainMap := make(map[string]struct{})
 	for sb := range sbChan {
+		sblower := strings.ToLower(sb)
+		uniDomainMap[sblower] = struct{}{}
+	}
+	for sb := range uniDomainMap {
 		subdomains = append(subdomains, sb)
 	}
 	return subdomains, nil
