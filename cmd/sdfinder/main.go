@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -117,14 +116,9 @@ func main() {
 		subdomainFinders.SendToQueriersAndAggr(context.Background(), inChan),
 	)
 	go func() {
-		for {
-			domain, err := reader.Get()
-			if err != nil && err != io.EOF {
-				log.Fatalf("read input err: %v", err)
-				break
-			}
+		if err := sdfinder.Read(reader, func(domain string) {
 			if len(domain) == 0 {
-				continue
+				return
 			}
 			var queries []sources.Query
 			query := sources.Query{Domain: domain}
@@ -142,11 +136,11 @@ func main() {
 			for _, qItem := range queries {
 				inChan <- qItem
 			}
-			if err == io.EOF {
-				break
-			}
+		}, func() {
+			close(inChan)
+		}); err != nil {
+			log.Fatal(err)
 		}
-		close(inChan)
 	}()
 
 	// open file to write the result
