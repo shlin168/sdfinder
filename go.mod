@@ -1,6 +1,6 @@
 module github.com/shlin168/sdfinder
 
-go 1.18
+go 1.21
 
 require (
 	github.com/PuerkitoBio/goquery v1.8.0
